@@ -147,6 +147,11 @@ def fmt_ago(ts) -> str:
 
 
 # per-1M-token (input, output) USD. cache-write = 1.25x in, cache-read = 0.1x in
+#
+# These are a snapshot and WILL drift as providers change prices / ship models.
+# Every cost figure in the widget is an estimate.  Override or extend this table
+# without touching code by adding a "pricing" block to the config:
+#     "pricing": { "claude-sonnet-5": [3.0, 15.0], "my-model": [1.0, 4.0] }
 PRICING = {
     "claude-opus-4": (5.0, 25.0), "claude-opus-5": (5.0, 25.0),
     "claude-sonnet-4": (3.0, 15.0), "claude-sonnet-5": (2.0, 10.0),
@@ -157,6 +162,16 @@ PRICING = {
     "gpt-4o-mini": (0.15, 0.60), "o4-mini": (1.1, 4.4), "o3": (2.0, 8.0),
     "codex-mini": (1.5, 6.0),
 }
+
+
+def apply_pricing_overrides(cfg: dict | None) -> None:
+    """Merge a config ``pricing`` block into PRICING (values: [in, out] per 1M)."""
+    for key, pair in ((cfg or {}).get("pricing") or {}).items():
+        try:
+            pin, pout = pair
+            PRICING[str(key).lower()] = (float(pin), float(pout))
+        except Exception:
+            continue
 
 
 def price_for(model: str):
@@ -1016,7 +1031,14 @@ class AntigravityProvider(Provider):
             self._snap = {**super().snapshot(), "ok": False,
                           "error": "Antigravity IDE not running"}
             return
-        self._snap = self._parse(data)
+        try:
+            self._snap = self._parse(data)
+        except Exception as exc:
+            # the language-server RPC is private and undocumented - an IDE
+            # update can change its shape.  Degrade gracefully instead of
+            # taking the widget down.
+            self._snap = {**super().snapshot(), "ok": False,
+                          "error": f"Antigravity data format changed ({exc})"}
 
     def _parse(self, data: dict) -> dict:
         us = data.get("userStatus") or {}
@@ -1213,6 +1235,7 @@ _BUILTINS = {
 
 def build_providers(config: dict | None = None) -> list[Provider]:
     config = config or load_config()
+    apply_pricing_overrides(config)
     pcfg = config.get("providers") or {}
     out: list[Provider] = []
     for key, cls in _BUILTINS.items():

@@ -3,6 +3,12 @@
 A small, frameless window you park next to your editor. Simple by default; the
 detail is one click away.
 
+> **Windows only.** The launchers (`.vbs` / `.bat`), the Antigravity detection
+> (`language_server_windows_*.exe` + PowerShell), and the IDE / foreground /
+> DPI handling all use Windows APIs (`ctypes.windll`, `powershell`, `tasklist`).
+> The session-log parsing itself is portable, but the app as shipped does not
+> run on macOS or Linux. Licensed **MIT** — see [`LICENSE`](LICENSE).
+
 | Default view | ▾ more details | Minimized strip |
 |---|---|---|
 | ![main](docs/widget-main.png) | ![details](docs/widget-details.png) | ![minimized](docs/widget-min.png) |
@@ -172,6 +178,9 @@ present; set `"enabled": false` to hide one, `"enabled": true` to force it.
       "cache_read_field": ""
     }
   ]
+},
+"pricing": {                        // optional: fix / add model prices ($/1M)
+  "claude-sonnet-5": [3.0, 15.0]    // [input, output]; prefix-matched
 }
 ```
 
@@ -182,7 +191,15 @@ records where `role_field == "user"` as messages, and sums the token fields
 
 Cost figures are **estimates** — exact token counts, priced by the `PRICING`
 table at the top of `usage_sources.py` (Claude + OpenAI models; cache-read 0.1×,
-cache-write 1.25×). Unknown models are counted but priced at $0.
+cache-write 1.25×). Unknown models are counted but priced at $0. Prices drift, so
+override or add entries from the config without touching code:
+
+```jsonc
+"pricing": {
+  "claude-sonnet-5": [3.0, 15.0],   // [input, output] USD per 1M tokens
+  "my-model":        [1.0, 4.0]      // prefix-matched against the model id
+}
+```
 
 ---
 
@@ -200,9 +217,38 @@ cache-write 1.25×). Unknown models are counted but priced at $0.
 ## Troubleshooting
 
 - **Antigravity: "not running"** — open the IDE; it's re-found automatically.
+- **Antigravity: "data format changed"** — an IDE update changed the private
+  RPC; the rest of the widget keeps working. Open an issue.
 - **Codex section missing** — appears once Codex has written a session log to
   `~/.codex/sessions/`; force with `"enabled": true`.
 - **Can't resize** — use the striped bottom-right grip, or right-click → Size.
 - **Widget off-screen / wrong size** — delete `~/.claude-usage-widget.json`
   (back up your `providers` block first).
-- **Wrong cost** — edit `PRICING` in `usage_sources.py`.
+- **Wrong cost** — add a `pricing` block to the config (see above).
+- **Limit % / reset looks stale** — the header shows how old Claude Code's
+  cached `/usage` figures are; run `/usage` in Claude Code to refresh them.
+
+---
+
+## Limitations
+
+- **Windows only** — see the note at the top.
+- **Antigravity** integration reads the IDE's *private, undocumented* local RPC
+  (the one the "Antigravity Token Usage" extension uses). An IDE update can
+  change or remove it; the widget then shows an error for that section only and
+  everything else keeps working.
+- **Costs are estimates.** The `PRICING` table is a hand-maintained snapshot and
+  goes out of date when providers change prices or ship models; unknown models
+  price at $0. Correct it with the `pricing` config block.
+- **Claude limit figures are as fresh as Claude Code's last `/usage` fetch.**
+  The widget reads Anthropic's real numbers from `~/.claude.json`
+  (`cachedUsageUtilization`) but does not call the API itself, so the values are
+  only as current as that cache; their age is shown in the section header.
+- Everything is read-only from local files/RPC. Nothing is sent anywhere
+  (OpenRouter, if you enable it with a key, is the sole network call).
+
+---
+
+## License
+
+[MIT](LICENSE) © Zeeshan Qadir. Use it, fork it, ship it.

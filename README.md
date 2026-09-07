@@ -210,7 +210,21 @@ override or add entries from the config without touching code:
 | `usage_widget.pyw` | window: layout, rendering, drag/resize/scroll, tooltips, history window |
 | `usage_sources.py` | providers — one class per agent, all returning the same snapshot shape |
 | `run-widget.vbs` / `.bat` | launchers |
+| `test_pricing.py` | tests for the pricing table, config overrides, cost maths |
 | `~/.claude-usage-widget.json` | saved window state + provider config |
+
+---
+
+## Tests
+
+```sh
+python -m unittest discover -v
+```
+
+Stdlib `unittest`, no `pip install` - same promise as the widget itself.
+Covers the `PRICING` defaults, config overrides (including that one
+config's overrides never leak into the next), `price_for()` longest-prefix
+matching, and `cost_of()` maths.
 
 ---
 

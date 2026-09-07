@@ -162,10 +162,19 @@ PRICING = {
     "gpt-4o-mini": (0.15, 0.60), "o4-mini": (1.1, 4.4), "o3": (2.0, 8.0),
     "codex-mini": (1.5, 6.0),
 }
+_PRICING_DEFAULTS = dict(PRICING)      # pristine copy to reset to each reload
 
 
 def apply_pricing_overrides(cfg: dict | None) -> None:
-    """Merge a config ``pricing`` block into PRICING (values: [in, out] per 1M)."""
+    """Rebuild PRICING from the built-in defaults, then merge this config's
+    ``pricing`` block (values: ``[in, out]`` USD per 1M tokens).
+
+    Resetting first means a config that *removes* an override actually restores
+    the default price - overrides from an earlier ``load_config`` never leak
+    into a later one.
+    """
+    PRICING.clear()
+    PRICING.update(_PRICING_DEFAULTS)
     for key, pair in ((cfg or {}).get("pricing") or {}).items():
         try:
             pin, pout = pair

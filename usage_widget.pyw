@@ -78,6 +78,32 @@ def _process_running(exe_lower: str) -> bool:
     except Exception:
         return True
 
+
+def _ide_start_ts() -> float | None:
+    """Unix time the Antigravity IDE was launched (earliest of its processes).
+
+    This anchors "session time" to the *IDE session*, not to this widget's own
+    process - so the clock keeps counting even if the widget is restarted, and
+    only goes back to 0 when the IDE itself is restarted.
+    """
+    if os.name != "nt":
+        return None
+    ps = ("$p = Get-Process -Name 'Antigravity IDE','Antigravity' "
+          "-ErrorAction SilentlyContinue | Where-Object { $_.StartTime } | "
+          "Sort-Object StartTime | Select-Object -First 1; "
+          "if ($p) { $e = [datetime]::new(1970,1,1,0,0,0,"
+          "[System.DateTimeKind]::Utc); "
+          "'{0:0}' -f ($p.StartTime.ToUniversalTime() - $e).TotalSeconds }")
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=8,
+            creationflags=0x08000000)
+        s = (out.stdout or "").strip().split(".")[0]
+        return float(s) if s.lstrip("-").isdigit() else None
+    except Exception:
+        return None
+
 CFG = U.CONFIG_PATH
 DEFAULT_POLL = {"claude_code": 5, "antigravity": 30, "codex": 10,
                 "openrouter": 120}
@@ -233,7 +259,13 @@ class UsageWidget(tk.Tk):
         self.f_tiny = tkfont.Font(family="Consolas", size=8)
 
         self.visibility = self.cfg.get("visibility", "antigravity")  # or "always"
-        self._start_ts = time.time()
+        # "session time" is measured from when the IDE was launched (see
+        # _ide_start_ts).  Start with the widget's own start time and refine it
+        # once the IDE process has been queried; re-check periodically so an IDE
+        # restart (new launch time) restarts the clock.
+        self._proc_start = time.time()
+        self._start_ts = self._proc_start
+        self._ide_start = None
         self._hidden = False
         self._saved_geo = self.cfg.get("geometry")
         self._vis_ticks = 0
@@ -266,6 +298,7 @@ class UsageWidget(tk.Tk):
         self.after(1000, self._tick)
         self.after(300, self._assert_top)          # topmost sticks after mapping
         self.after(800, self._visibility_tick)
+        self.after(250, lambda: self._sync_ide_anchor(initial=True))
         self.protocol("WM_DELETE_WINDOW", self._quit)
 
         if self.cfg.get("collapsed"):
@@ -657,6 +690,28 @@ class UsageWidget(tk.Tk):
         except tk.TclError:
             pass
 
+    # -- session-clock anchor (tied to the IDE launch, not this process) --
+    def _sync_ide_anchor(self, initial=False):
+        def work():
+            ts = _ide_start_ts()
+            try:
+                self.after(0, lambda: self._apply_ide_anchor(ts))
+            except (RuntimeError, tk.TclError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_ide_anchor(self, ts):
+        if not ts or ts <= 0 or ts > time.time() + 60:
+            return
+        # first successful detection, or the IDE was restarted -> re-anchor
+        if self._ide_start is None or abs(ts - self._ide_start) > 5:
+            self._ide_start = ts
+            self._start_ts = ts
+            try:
+                self._render_clocks()
+            except tk.TclError:
+                pass
+
     def _menu(self):
         m = tk.Menu(self, tearoff=0, bg=CARD, fg=FG,
                     activebackground="#2b2f3a", activeforeground=FG)
@@ -748,7 +803,7 @@ class UsageWidget(tk.Tk):
         try:
             if self.visibility == "always":
                 self._show()
-            elif time.time() - self._start_ts < 3.0:
+            elif time.time() - self._proc_start < 3.0:
                 self._show()                       # grace period after launch
             else:
                 fg = _foreground_exe()
@@ -766,6 +821,11 @@ class UsageWidget(tk.Tk):
                     and not _process_running("antigravity ide.exe")):
                 self._quit()
                 return
+
+            # every ~45s: re-anchor the session clock to the IDE launch time
+            # (catches an IDE restart while the widget keeps running)
+            if self._vis_ticks % 60 == 0:
+                self._sync_ide_anchor()
         except Exception:
             pass
         self.after(750, self._visibility_tick)
@@ -893,8 +953,9 @@ class UsageWidget(tk.Tk):
                             "conversation only (input + output + cache).")
             tips[1].text = ("Prompts a human actually typed this session. Tool "
                             "results and system / injected messages are not counted.")
-            tips[2].text = ("Time since this widget / IDE session started. Only "
-                            "resets when the widget (or the IDE) is closed.")
+            tips[2].text = ("Time since the Antigravity IDE was launched. It keeps "
+                            "counting if the widget itself restarts; it only goes "
+                            "back to 0:00 when the IDE is restarted.")
 
         # models used this session  (name · tokens · messages)
         rows = sess.get("model_rows", [])

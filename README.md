@@ -30,7 +30,7 @@ The default view is deliberately minimal — **this session only**:
 |---|---|
 | **tokens · this session** | every token *this session* used (input + output + cache) |
 | **msgs · this session** | how many prompts **a human actually typed** this session — tool-result carriers, system reminders, slash-command echoes and hook output are classified out, not counted |
-| **time since IDE opened** | live clock since **this widget / IDE session started** — it does *not* reset when Claude Code opens a new chat log; it only resets when you close the widget (which, in `antigravity` visibility mode, is when you close the IDE) |
+| **session time** | live clock since **the Antigravity IDE was launched** (read from the IDE process's own start time). It does *not* reset when Claude Code opens a new chat log, and it keeps counting even if the widget itself is restarted — it only returns to `0:00` when the **IDE** is restarted. In `always` visibility mode with no IDE running it falls back to the widget's own start time. |
 
 Every stat in the top strip is scoped to the **current session**. Cumulative
 figures live in the **usage** table below and under **▾ more details**.

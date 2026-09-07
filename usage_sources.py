@@ -17,6 +17,7 @@ Everything is local except OpenRouter (needs a key) and custom HTTP.
 
 from __future__ import annotations
 
+import calendar
 import datetime
 import glob
 import json
@@ -286,40 +287,55 @@ def _roll_future(ts: float, period: float, now: float) -> float:
     return ts
 
 
+def _advance_month(y: int, m: int) -> tuple[int, int]:
+    return (y + 1, 1) if m == 12 else (y, m + 1)
+
+
+def _clamp_day(y: int, m: int, day: int) -> int:
+    """Day-of-month pinned to what that month actually has (Feb, 30-day months)."""
+    return max(1, min(day, calendar.monthrange(y, m)[1]))
+
+
 def subscription_days_left(spec: dict | None) -> dict | None:
     """
     From a config block describing when the plan renews, work out how many
-    whole days are left in the current billing period.
+    whole days are left in the current billing period.  Returns ``None`` on any
+    missing or malformed input (so a config typo just hides the row).
 
       {"renews": "2026-10-01"}   explicit next-renewal date (rolls monthly)
-      {"renews_day": 1}          day-of-month the plan renews on (1-28)
+      {"renews_day": 1}          day-of-month the plan renews on (1-31)
+
+    A day past the month's length (e.g. 31 in September, 30 in February) lands
+    on that month's last day - never a silent 3-day shift.
     """
     if not isinstance(spec, dict):
         return None
-    today = datetime.date.today()
-    target = None
-    raw = spec.get("renews")
-    if raw:
-        try:
-            target = datetime.date.fromisoformat(str(raw)[:10])
-        except Exception:
-            target = None
-        while target and target <= today:                 # roll month by month
-            m, y = target.month % 12 + 1, target.year + (target.month // 12)
-            day = min(target.day, [31, 29 if y % 4 == 0 and (y % 100 or not y % 400)
-                                   else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30,
-                                   31][m - 1])
-            target = datetime.date(y, m, day)
-    elif spec.get("renews_day"):
-        d = max(1, min(28, int(spec["renews_day"])))
-        target = today.replace(day=d)
-        if target <= today:
-            m, y = today.month % 12 + 1, today.year + (today.month // 12)
-            target = datetime.date(y, m, d)
-    if not target:
+    try:
+        today = datetime.date.today()
+        target = None
+
+        raw = spec.get("renews")
+        if raw:
+            base = datetime.date.fromisoformat(str(raw)[:10])
+            want, y, m = base.day, base.year, base.month
+            target = datetime.date(y, m, _clamp_day(y, m, want))
+            while target <= today:                        # roll month by month
+                y, m = _advance_month(y, m)
+                target = datetime.date(y, m, _clamp_day(y, m, want))
+        elif spec.get("renews_day") is not None:
+            want = max(1, min(31, int(spec["renews_day"])))
+            y, m = today.year, today.month
+            target = datetime.date(y, m, _clamp_day(y, m, want))
+            if target <= today:
+                y, m = _advance_month(y, m)
+                target = datetime.date(y, m, _clamp_day(y, m, want))
+
+        if target is None:
+            return None
+        return {"days_left": (target - today).days,
+                "renews_on": target.strftime("%d %b %Y")}
+    except Exception:
         return None
-    return {"days_left": (target - today).days,
-            "renews_on": target.strftime("%d %b %Y")}
 
 
 # ---------------------------------------------------------------------------

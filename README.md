@@ -162,7 +162,9 @@ present; set `"enabled": false` to hide one, `"enabled": true` to force it.
     },
     "subscription": {             // optional — auto-detected from Claude's login
       "renews": "2026-10-01"      //   files; set this only to correct the date.
-      // "renews_day": 1          //   day-of-month the plan renews on (1-28)
+      // "renews_day": 1          //   day-of-month the plan renews on (1-31;
+      //                          //   a day past the month's end lands on its
+      //                          //   last day). A bad value just hides the row.
     }
   },
   "antigravity": { "enabled": true,  "poll_seconds": 30 },

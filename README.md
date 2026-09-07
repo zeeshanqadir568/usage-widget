@@ -53,14 +53,16 @@ Then two small tables:
     the guessed date is wrong. Shows *trial ends in Nd* instead while a Claude
     Code trial is active. Plan tier, rate-limit tier and account also appear
     under **▾ more details**.
-  - **limits · from Claude** — the **real** rolling windows Anthropic enforces,
-    read straight from Claude Code's own `/usage` cache
-    (`~/.claude.json` → `cachedUsageUtilization`): the **5-hour** (session)
-    window and the **weekly** (7-day) window, each with its true **% used** and
-    its true **reset time** — no estimate, no config. The header shows how long
-    ago Claude Code last refreshed those figures. (Anthropic has no "daily"
-    limit; if the cache isn't present yet the row falls back to a local token
-    estimate, clearly marked, until you next run Claude Code.)
+  - **limits · live** — the **real** rolling windows Anthropic enforces: the
+    **5-hour** (session) window and the **weekly** (7-day) window, each with its
+    true **% used** and true **reset time** — no estimate, no config. The widget
+    calls the same endpoint `/usage` does (`api.anthropic.com/api/oauth/usage`,
+    with Claude Code's stored OAuth token) on a ~90 s cache, so the bar updates
+    on its own — you never have to type `/usage`. If that call is disabled
+    (`"live_usage": false`) or fails, it falls back to Claude Code's on-disk
+    cache (`~/.claude.json` → `cachedUsageUtilization`, only as fresh as the
+    last time *you* ran `/usage`); the header then reads **"Claude cache
+    (…ago)"**. Anthropic has no "daily" limit.
   - **this session · est. share** — roughly how much of each real window *this
     session* is responsible for, derived from Anthropic's live % over the same
     span (marked `~`).
@@ -79,9 +81,12 @@ Then two small tables:
 - **history ›** — a window listing **every past session** with the same columns
   (when · duration · msgs · tokens · cost · models).
 
-Data comes from the agent's own local logs
-(`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/*.jsonl`, …). Nothing
-leaves your machine.
+Token / message / cost data comes from the agent's own **local logs**
+(`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/*.jsonl`, …) and never
+leaves your machine. The one exception is the Claude **limit %** — the widget
+calls Anthropic's `/api/oauth/usage` (same request `/usage` makes, same host,
+your own OAuth token) so the bar stays current on its own. Turn that off with
+`"live_usage": false` and it uses Claude Code's on-disk cache instead.
 
 ### Quota agents — Antigravity, OpenRouter
 
@@ -101,8 +106,8 @@ Top stats: models available · models exhausted · time to next reset.
 Antigravity data is read from the IDE's local Language Server (the private
 Connect RPC the "Antigravity Token Usage" extension uses — found by scanning for
 `language_server_windows_*.exe` and its CSRF token; auto-rediscovers when the IDE
-restarts). OpenRouter is the **only** networked provider and is off until you add
-a key.
+restarts). Outbound calls: Claude's `/usage` endpoint (above; off with
+`"live_usage": false`), and OpenRouter (off until you add a key). Nothing else.
 
 ---
 
@@ -147,6 +152,7 @@ present; set `"enabled": false` to hide one, `"enabled": true` to force it.
 
 ```jsonc
 "visibility": "antigravity",      // or "always"
+"live_usage": true,               // false = never call /usage; use disk cache
 "providers": {
   "claude_code": {
     "enabled": true, "poll_seconds": 5,
@@ -256,12 +262,16 @@ matching, and `cost_of()` maths.
 - **Costs are estimates.** The `PRICING` table is a hand-maintained snapshot and
   goes out of date when providers change prices or ship models; unknown models
   price at $0. Correct it with the `pricing` config block.
-- **Claude limit figures are as fresh as Claude Code's last `/usage` fetch.**
-  The widget reads Anthropic's real numbers from `~/.claude.json`
-  (`cachedUsageUtilization`) but does not call the API itself, so the values are
-  only as current as that cache; their age is shown in the section header.
-- Everything is read-only from local files/RPC. Nothing is sent anywhere
-  (OpenRouter, if you enable it with a key, is the sole network call).
+- **Claude limit figures** come from `api.anthropic.com/api/oauth/usage` (the
+  endpoint `/usage` uses), called with Claude Code's stored OAuth token on a
+  ~90 s in-memory cache. The token is used only for that one request's
+  `Authorization` header and is never logged. If the token is expired, the call
+  is disabled (`"live_usage": false`), or the request fails, the widget falls
+  back to Claude Code's on-disk cache — only as fresh as your last manual
+  `/usage` — and the header says so. This is an undocumented OAuth endpoint and
+  could change.
+- Read-only otherwise: local files and the Antigravity localhost RPC. The only
+  other outbound call is OpenRouter, and only if you add a key.
 
 ---
 

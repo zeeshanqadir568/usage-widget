@@ -986,12 +986,14 @@ class UsageWidget(tk.Tk):
             rows.append([lead, f"{sub['days_left']}d", None,
                          sub.get("renews_on", "—")])
 
-        # real rolling limits from Claude Code's own /usage cache
+        # real rolling limits — fetched live, or from Claude Code's cache
         if usage.get("source") == "claude":
             ft = usage.get("fetched_ts")
-            hdr = "limits · from Claude" + (f" ({U.fmt_ago(ft)})" if ft else "")
+            age = f" ({U.fmt_ago(ft)})" if ft else ""
+            hdr = ("limits · live" + age) if usage.get("live") \
+                else ("limits · Claude cache" + age)
         else:
-            hdr = "limits · estimated (open Claude Code once)"
+            hdr = "limits · estimated (sign in to Claude Code)"
         rows.append([hdr, "", None, ""])
         for lr in usage.get("limit_rows", []):
             rows.append(["  " + lr["label"], lr["value"], lr.get("pct"),

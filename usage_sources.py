@@ -414,27 +414,75 @@ _USAGE_WINDOWS = [
     ("seven_day_sonnet", "weekly · Sonnet"),
 ]
 
+# the endpoint Claude Code's own `/usage` calls (found in its bundle)
+_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?skip_spend=1"
+_USAGE_BETA = "oauth-2025-04-20"
+_LIVE_USAGE_TTL = 90.0                      # seconds between real API calls
+_live_usage = {"ts": 0.0, "util": None, "tried": 0.0}
+_LIVE_USAGE_ENABLED = True                  # toggled by config ("live_usage")
 
-def detect_claude_usage() -> dict:
-    """
-    The REAL rate-limit utilization and reset times, straight from Claude Code's
-    own cache (``~/.claude.json`` -> ``cachedUsageUtilization``).  This is the
-    same data ``/usage`` shows - Anthropic's numbers, not a local estimate.
 
-    Returns ``{"fetched_ts": float|None, "windows": [ {label, key, pct,
-    resets_ts, used_dollars, limit_dollars} ... ]}`` or ``{}`` if the cache
-    is missing.
-    """
+def _oauth_access_token() -> str | None:
+    """Claude Code's stored token - only if present and not (about to be) expired.
+    Used solely for the Authorization header on the usage call; never logged."""
     try:
-        with open(os.path.expanduser("~/.claude.json")) as fh:
-            j = json.load(fh)
+        with open(os.path.expanduser("~/.claude/.credentials.json")) as fh:
+            oa = (json.load(fh) or {}).get("claudeAiOauth") or {}
     except Exception:
-        return {}
-    cu = j.get("cachedUsageUtilization") or {}
-    util = cu.get("utilization") or {}
-    if not util:
-        return {}
-    fa = cu.get("fetchedAtMs")
+        return None
+    tok = oa.get("accessToken")
+    exp = oa.get("expiresAt")              # ms epoch
+    if not tok or (exp and time.time() * 1000 > exp - 30_000):
+        return None
+    return tok
+
+
+def fetch_live_usage(force: bool = False) -> dict | None:
+    """
+    Ask Anthropic's real usage endpoint (the one ``/usage`` hits) for the
+    current utilization, using Claude Code's stored OAuth token.  Result is
+    cached in-memory for ``_LIVE_USAGE_TTL`` s.  Returns the ``utilization``
+    dict, or ``None`` on any problem (caller falls back to the file cache).
+
+    This is the only outbound call the widget makes for Claude Code, and it is
+    the same request/host as ``/usage``.  Disable with ``"live_usage": false``.
+    """
+    if not _LIVE_USAGE_ENABLED:
+        return None
+    now = time.time()
+    if not force and _live_usage["util"] is not None \
+            and now - _live_usage["ts"] < _LIVE_USAGE_TTL:
+        return _live_usage["util"]
+    if not force and now - _live_usage["tried"] < 15:      # back off after a fail
+        return _live_usage["util"]
+    _live_usage["tried"] = now
+    tok = _oauth_access_token()
+    if not tok:
+        return None
+    req = urllib.request.Request(_USAGE_URL, headers={
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+        "anthropic-beta": _USAGE_BETA,
+        "User-Agent": "claude-usage-widget",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=6) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    util = None
+    if isinstance(body, dict):
+        util = body.get("utilization")
+        if util is None and any(k in body for k in
+                                ("five_hour", "seven_day", "limits")):
+            util = body
+    if not isinstance(util, dict) or not util:
+        return None
+    _live_usage.update(ts=now, util=util)
+    return util
+
+
+def _windows_from_util(util: dict) -> list[dict]:
     windows = []
     for key, label in _USAGE_WINDOWS:
         blk = util.get(key)
@@ -447,7 +495,36 @@ def detect_claude_usage() -> dict:
             "used_dollars": blk.get("used_dollars"),
             "limit_dollars": blk.get("limit_dollars"),
         })
-    return {"fetched_ts": (fa / 1000.0) if fa else None, "windows": windows}
+    return windows
+
+
+def detect_claude_usage() -> dict:
+    """
+    The REAL rate-limit utilization and reset times - Anthropic's numbers, the
+    same data ``/usage`` shows.
+
+    Tries the live endpoint first (so the widget updates on its own, without
+    anyone typing ``/usage``); falls back to Claude Code's on-disk cache
+    (``~/.claude.json`` -> ``cachedUsageUtilization``) if the call is disabled
+    or fails.
+
+    Returns ``{"fetched_ts", "live": bool, "windows": [...]}`` or ``{}``.
+    """
+    live = fetch_live_usage()
+    if live:
+        return {"fetched_ts": _live_usage["ts"], "live": True,
+                "windows": _windows_from_util(live)}
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as fh:
+            cu = (json.load(fh) or {}).get("cachedUsageUtilization") or {}
+    except Exception:
+        return {}
+    util = cu.get("utilization") or {}
+    if not util:
+        return {}
+    fa = cu.get("fetchedAtMs")
+    return {"fetched_ts": (fa / 1000.0) if fa else None, "live": False,
+            "windows": _windows_from_util(util)}
 
 
 # ---------------------------------------------------------------------------
@@ -712,8 +789,9 @@ class ClaudeCodeProvider(_SessionLogProvider):
         real = detect_claude_usage()
         if real.get("windows"):
             ft = real.get("fetched_ts")
-            rows.append(("usage figures", "live from Claude · " + (
-                fmt_ago(ft) if ft else "cached")))
+            how = "fetched live" if real.get("live") else "Claude Code cache"
+            rows.append(("usage figures",
+                         f"{how} · {fmt_ago(ft) if ft else 'unknown age'}"))
             for w in real["windows"]:
                 when = fmt_reset_date(w["resets_ts"]) if w["resets_ts"] else "—"
                 rows.append((f"  {w['label']}", f"{w['pct']:.0f}% used · resets {when}"))
@@ -837,6 +915,7 @@ class ClaudeCodeProvider(_SessionLogProvider):
 
         return {
             "source": source,
+            "live": bool(real.get("live")),
             "fetched_ts": real.get("fetched_ts"),
             "limit_rows": limit_rows,
             "session_rows": session_rows,
@@ -1259,8 +1338,10 @@ _BUILTINS = {
 
 
 def build_providers(config: dict | None = None) -> list[Provider]:
+    global _LIVE_USAGE_ENABLED
     config = config or load_config()
     apply_pricing_overrides(config)
+    _LIVE_USAGE_ENABLED = config.get("live_usage", True) is not False
     pcfg = config.get("providers") or {}
     out: list[Provider] = []
     for key, cls in _BUILTINS.items():

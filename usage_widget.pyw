@@ -976,9 +976,6 @@ class UsageWidget(tk.Tk):
             self._clear(box)
             box._grid_sig = None
             return
-        dreset = U.fmt_reset_date(usage.get("daily_reset"))
-        wreset = U.fmt_reset_date(usage.get("weekly_reset"))
-        s, o = usage["session"], usage["overall"]
         rows = []
 
         sub = usage.get("subscription")
@@ -989,28 +986,35 @@ class UsageWidget(tk.Tk):
             rows.append([lead, f"{sub['days_left']}d", None,
                          sub.get("renews_on", "—")])
 
-        rows += [
-            ["this session", "", None, ""],
-            ["  daily",  s["daily"]["mid"],  s["daily"]["pct"],  dreset],
-            ["  weekly", s["weekly"]["mid"], s["weekly"]["pct"], wreset],
-            ["all sessions", "", None, ""],
-            # daily is intentionally omitted here — every past session rolls up
-            # into the weekly window, so an "all sessions today" row adds noise.
-            ["  weekly", o["weekly"]["mid"], o["weekly"]["pct"], wreset],
-        ]
+        # real rolling limits from Claude Code's own /usage cache
+        if usage.get("source") == "claude":
+            ft = usage.get("fetched_ts")
+            hdr = "limits · from Claude" + (f" ({U.fmt_ago(ft)})" if ft else "")
+        else:
+            hdr = "limits · estimated (open Claude Code once)"
+        rows.append([hdr, "", None, ""])
+        for lr in usage.get("limit_rows", []):
+            rows.append(["  " + lr["label"], lr["value"], lr.get("pct"),
+                         U.fmt_reset_date(lr.get("reset_ts"))])
+
+        sr = usage.get("session_rows") or []
+        if sr:
+            rows.append(["this session · est. share", "", None, ""])
+            for r in sr:
+                rows.append(["  of " + r["label"], f"~{r['pct']:.0f}%",
+                             r["pct"], ""])
+
         src = usage.get("by_source") or []
         if src:
-            rows.append(["by source — day% / wk% of limit", "", None, ""])
+            rows.append(["by source · this week", "", None, ""])
             for it in src[:6]:
-                dp = ("%.0f" % it["daily_pct"]
-                      if it.get("daily_pct") is not None else "–")
-                wp = ("%.0f" % it["weekly_pct"]
+                wp = ("~%.0f%%" % it["weekly_pct"]
                       if it.get("weekly_pct") is not None else "–")
                 rows.append([self._short(f"{it['badge']} {it['name']}", 13),
                              U.fmt_tokens(it["tok_week"]),
-                             it.get("weekly_pct"), f"{dp}%/{wp}%"])
-        self._grid_table(box, headers=["usage", "used / limit", "", "resets"],
-                         widths=[13, 13, 0, 10], rows=rows, neutral=False)
+                             it.get("weekly_pct"), wp + " of wk"])
+        self._grid_table(box, headers=["usage", "used", "", "resets"],
+                         widths=[13, 12, 0, 12], rows=rows, neutral=False)
 
     # -- quota mode -------------------------------------------------
     def _render_quota(self, sec, snap):
@@ -1054,8 +1058,11 @@ class UsageWidget(tk.Tk):
         box._grid_sig = sig
         for ci, (h, w) in enumerate(zip(headers, widths)):
             if ci == 2:
-                box.grid_columnconfigure(ci, weight=1, minsize=44)
+                # fixed-width bar column; the last column takes the slack so the
+                # reset text on the right is never pushed off the edge
+                box.grid_columnconfigure(ci, weight=0, minsize=52)
                 continue
+            box.grid_columnconfigure(ci, weight=(1 if ci == 3 else 0))
             lbl = tk.Label(box, text=h.upper(), bg=BG, fg=FG_FAINT,
                            font=self.f_tiny, anchor="w",
                            width=w if w else None)
@@ -1074,10 +1081,9 @@ class UsageWidget(tk.Tk):
             tk.Label(box, text=mid, bg=BG, fg=FG, font=self.f_small,
                      anchor="w", width=widths[1]).grid(
                 row=ri, column=1, sticky="w", padx=(0, 6))
-            # width=36 keeps Tk's default 378px canvas request from blowing the
-            # grid's natural width past the window (the column weight still lets
-            # the bar stretch to fill whatever space is free).
-            bar = tk.Canvas(box, height=7, width=36, bg=TRACK,
+            # explicit width keeps Tk's default 378px canvas request from
+            # blowing the grid's natural width past the window
+            bar = tk.Canvas(box, height=7, width=46, bg=TRACK,
                             highlightthickness=0)
             bar.grid(row=ri, column=2, sticky="ew", padx=(0, 6))
             bar.bind("<Configure>",

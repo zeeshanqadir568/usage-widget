@@ -366,6 +366,50 @@ def detect_claude_account() -> dict:
     return out
 
 
+# window key -> friendly label, in display order
+_USAGE_WINDOWS = [
+    ("five_hour", "5-hour"),
+    ("seven_day", "weekly"),
+    ("seven_day_opus", "weekly · Opus"),
+    ("seven_day_sonnet", "weekly · Sonnet"),
+]
+
+
+def detect_claude_usage() -> dict:
+    """
+    The REAL rate-limit utilization and reset times, straight from Claude Code's
+    own cache (``~/.claude.json`` -> ``cachedUsageUtilization``).  This is the
+    same data ``/usage`` shows - Anthropic's numbers, not a local estimate.
+
+    Returns ``{"fetched_ts": float|None, "windows": [ {label, key, pct,
+    resets_ts, used_dollars, limit_dollars} ... ]}`` or ``{}`` if the cache
+    is missing.
+    """
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as fh:
+            j = json.load(fh)
+    except Exception:
+        return {}
+    cu = j.get("cachedUsageUtilization") or {}
+    util = cu.get("utilization") or {}
+    if not util:
+        return {}
+    fa = cu.get("fetchedAtMs")
+    windows = []
+    for key, label in _USAGE_WINDOWS:
+        blk = util.get(key)
+        if not isinstance(blk, dict) or blk.get("utilization") is None:
+            continue
+        windows.append({
+            "key": key, "label": label,
+            "pct": float(blk["utilization"]),
+            "resets_ts": _parse_iso(blk.get("resets_at")) or None,
+            "used_dollars": blk.get("used_dollars"),
+            "limit_dollars": blk.get("limit_dollars"),
+        })
+    return {"fetched_ts": (fa / 1000.0) if fa else None, "windows": windows}
+
+
 # ---------------------------------------------------------------------------
 # base
 # ---------------------------------------------------------------------------
@@ -625,58 +669,58 @@ class ClaudeCodeProvider(_SessionLogProvider):
             rows.append(("account", a["email"]))
         if self.show_account and a.get("org") and a.get("org") != a.get("email"):
             rows.append(("organisation", a["org"]))
+        real = detect_claude_usage()
+        if real.get("windows"):
+            ft = real.get("fetched_ts")
+            rows.append(("usage figures", "live from Claude · " + (
+                fmt_ago(ft) if ft else "cached")))
+            for w in real["windows"]:
+                when = fmt_reset_date(w["resets_ts"]) if w["resets_ts"] else "—"
+                rows.append((f"  {w['label']}", f"{w['pct']:.0f}% used · resets {when}"))
+        else:
+            rows.append(("usage figures", "estimated (Claude's /usage cache "
+                         "not found yet — open Claude Code once)"))
         return rows
 
     def _limit_rows(self, span, views, now) -> list[dict]:
-        d = datetime.datetime.fromtimestamp(now)
-        midnight = datetime.datetime(d.year, d.month, d.day).timestamp()
-        week_start = midnight - d.weekday() * 86400          # local Monday 00:00
+        """Real rolling windows from Claude Code's /usage cache; a rough local
+        token estimate only if that cache isn't present."""
+        real = detect_claude_usage()
+        if real.get("windows"):
+            return [{
+                "name": w["label"], "configured": True,
+                "left_pct": max(0.0, 100.0 - w["pct"]),
+                "value": (f"${w['used_dollars']:.2f} / ${w['limit_dollars']:g}"
+                          if w.get("used_dollars") is not None
+                          and w.get("limit_dollars")
+                          else f"{w['pct']:.0f}% used"),
+                "reset_ts": w["resets_ts"],
+            } for w in real["windows"]]
 
-        active = [v["started_ts"] for v in views
-                  if (v["last_ts"] or 0) >= now - 5 * 3600 and v.get("started_ts")]
-        anchor_5h = max(now - 5 * 3600, min(active)) if active else now - 5 * 3600
-
-        plan = [
-            ("5-hour", span(now - 5 * 3600),
-             _roll_future(anchor_5h + 5 * 3600, 5 * 3600, now)),
-            ("today", span(midnight), _roll_future(midnight + 86400, 86400, now)),
-            ("this week", span(week_start),
-             _roll_future(week_start + 7 * 86400, 7 * 86400, now)),
+        a5 = span(now - 5 * 3600)
+        a7 = span(now - 7 * 86400)
+        return [
+            {"name": "5-hour", "configured": False, "left_pct": None,
+             "value": f"{fmt_tokens(a5['tok'])} · ${a5['cost']:.2f} (est)",
+             "reset_ts": None},
+            {"name": "weekly", "configured": False, "left_pct": None,
+             "value": f"{fmt_tokens(a7['tok'])} · ${a7['cost']:.2f} (est)",
+             "reset_ts": None},
         ]
-        rows = []
-        for name, agg, reset_ts in plan:
-            spec = self.limits.get(name) or {}
-            lc, lt = spec.get("cost_usd"), spec.get("tokens")
-            if lc:
-                left = max(0.0, 100.0 * (1 - agg["cost"] / lc))
-                rows.append({"name": name, "configured": True, "left_pct": left,
-                             "value": f"${agg['cost']:.2f} / ${lc:g}",
-                             "reset_ts": reset_ts})
-            elif lt:
-                left = max(0.0, 100.0 * (1 - agg["tok"] / lt))
-                rows.append({"name": name, "configured": True, "left_pct": left,
-                             "value": f"{fmt_tokens(agg['tok'])} / {fmt_tokens(lt)}",
-                             "reset_ts": reset_ts})
-            else:
-                rows.append({"name": name, "configured": False, "left_pct": None,
-                             "value": f"${agg['cost']:.2f} · {fmt_tokens(agg['tok'])}",
-                             "reset_ts": reset_ts})
-        return rows
 
     # -- split daily / weekly usage + per-source breakdown -----------
     def _usage_block(self, views, now) -> dict | None:
         if not views:
             return None
-        d = datetime.datetime.fromtimestamp(now)
-        midnight = datetime.datetime(d.year, d.month, d.day).timestamp()
-        week_start = midnight - d.weekday() * 86400
         cur = views[0]
 
-        daily = self.limits.get("today") or {}
-        weekly = self.limits.get("this week") or {}
-        d_tok, d_cost = daily.get("tokens"), daily.get("cost_usd")
-        w_tok, w_cost = weekly.get("tokens"), weekly.get("cost_usd")
+        # --- Anthropic's real numbers (from Claude Code's own /usage cache) ---
+        real = detect_claude_usage()
+        rw = {w["key"]: w for w in real.get("windows", [])}
+        real_5h = rw.get("five_hour")
+        real_wk = rw.get("seven_day")
 
+        # local token aggregation over the matching rolling windows
         def agg(since):
             t = c = 0
             for v in views:
@@ -684,40 +728,61 @@ class ClaudeCodeProvider(_SessionLogProvider):
                     t += v["tokens"]; c += v["cost"]
             return t, c
 
-        today_tok, today_cost = agg(midnight)
-        week_tok, week_cost = agg(week_start)
+        tok_5h, _ = agg(now - 5 * 3600)
+        tok_wk, cost_wk = agg(now - 7 * 86400)
 
-        def row(part_tok, part_cost, lim_tok, lim_cost):
-            if lim_cost:
-                return {"mid": f"${part_cost:.2f} / ${lim_cost:g}",
-                        "pct": 100.0 * part_cost / lim_cost}
-            if lim_tok:
-                return {"mid": f"{fmt_tokens(part_tok)} / {fmt_tokens(lim_tok)}",
-                        "pct": 100.0 * part_tok / lim_tok}
-            return {"mid": fmt_tokens(part_tok), "pct": None}
+        # --- limit rows: the real windows, or an honest estimate if uncached ---
+        limit_rows, source = [], "estimate"
+        if real.get("windows"):
+            source = "claude"
+            for w in real["windows"]:
+                val = f"{w['pct']:.0f}% used"
+                if w.get("used_dollars") is not None and w.get("limit_dollars"):
+                    val = f"${w['used_dollars']:.2f} / ${w['limit_dollars']:g}"
+                limit_rows.append({
+                    "label": w["label"], "pct": w["pct"], "value": val,
+                    "reset_ts": w["resets_ts"], "real": True,
+                })
+        else:
+            limit_rows = [
+                {"label": "5-hour", "pct": None,
+                 "value": f"{fmt_tokens(tok_5h)} used", "reset_ts": None,
+                 "real": False},
+                {"label": "weekly", "pct": None,
+                 "value": f"{fmt_tokens(tok_wk)} used", "reset_ts": None,
+                 "real": False},
+            ]
 
-        # per source, today + this week
+        # --- this session's estimated share of each real window --------------
+        # back out the implied ceiling from Anthropic's % over the same window
+        session_rows = []
+        if real_5h and real_5h["pct"] > 0 and tok_5h:
+            session_rows.append({
+                "label": "5-hour",
+                "pct": real_5h["pct"] * cur["tokens"] / tok_5h})
+        if real_wk and real_wk["pct"] > 0 and tok_wk:
+            session_rows.append({
+                "label": "weekly",
+                "pct": real_wk["pct"] * cur["tokens"] / tok_wk})
+
+        # --- by source, this week: tokens + contribution to the weekly limit -
         by_name: dict[str, dict] = {}
         for v in views:
+            if (v["last_ts"] or 0) < now - 7 * 86400:
+                continue
             meta = v.get("source") or dict(_DEFAULT_SOURCE)
             b = by_name.setdefault(meta["name"], {
                 "name": meta["name"], "badge": meta["badge"],
-                "color": meta["color"], "tok_today": 0, "tok_week": 0,
-                "cost_week": 0.0})
-            lt = v["last_ts"] or 0
-            if lt >= week_start:
-                b["tok_week"] += v["tokens"]; b["cost_week"] += v["cost"]
-            if lt >= midnight:
-                b["tok_today"] += v["tokens"]
-
-        def share(part, whole, limit):
-            denom = limit or whole
-            return (100.0 * part / denom) if denom else None
-
+                "color": meta["color"], "tok_week": 0, "cost_week": 0.0})
+            b["tok_week"] += v["tokens"]; b["cost_week"] += v["cost"]
         by_source = sorted(by_name.values(), key=lambda s: -s["tok_week"])
         for s in by_source:
-            s["daily_pct"] = share(s["tok_today"], today_tok, d_tok)
-            s["weekly_pct"] = share(s["tok_week"], week_tok, w_tok)
+            frac = (s["tok_week"] / tok_wk) if tok_wk else None
+            s["share_pct"] = (frac * 100.0) if frac is not None else None
+            if real_wk and frac is not None:
+                s["weekly_pct"] = real_wk["pct"] * frac      # share of the limit
+            else:
+                s["weekly_pct"] = s["share_pct"]
 
         sub = subscription_days_left(self.subscription)
         if sub:
@@ -731,18 +796,14 @@ class ClaudeCodeProvider(_SessionLogProvider):
                     "%d %b %Y")
 
         return {
-            "daily_reset": _roll_future(midnight + 86400, 86400, now),
-            "weekly_reset": _roll_future(week_start + 7 * 86400, 7 * 86400, now),
-            "subscription": sub,
-            "session": {
-                "daily": row(cur["tokens"], cur["cost"], d_tok, d_cost),
-                "weekly": row(cur["tokens"], cur["cost"], w_tok, w_cost),
-            },
-            "overall": {
-                "daily": row(today_tok, today_cost, d_tok, d_cost),
-                "weekly": row(week_tok, week_cost, w_tok, w_cost),
-            },
+            "source": source,
+            "fetched_ts": real.get("fetched_ts"),
+            "limit_rows": limit_rows,
+            "session_rows": session_rows,
+            "session_tokens": cur["tokens"],
+            "week_tokens": tok_wk,
             "by_source": by_source,
+            "subscription": sub,
         }
 
     def _ingest(self, sess: dict, rec: dict) -> None:

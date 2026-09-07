@@ -47,24 +47,22 @@ Then two small tables:
     the guessed date is wrong. Shows *trial ends in Nd* instead while a Claude
     Code trial is active. Plan tier, rate-limit tier and account also appear
     under **▾ more details**.
-  - **this session** · `daily` + `weekly` — how much *this* session has spent
-    against each ceiling. Same token count, two bars, because the daily and
-    weekly ceilings differ.
-  - **all sessions** · `weekly` — every session combined for the week. (There is
-    no "all sessions / daily" row — every past session already rolls up into the
-    weekly window, so it added noise.)
-  - **by source · share of limit** — one row per place Claude Code runs on this
-    PC (each `~/.claude/projects/<folder>` folds into a named source — e.g.
-    **OpenClaw**, **Claude Desktop**, plain **Claude Code**), showing its tokens
-    this week and its share of the **daily** and **weekly ceilings**. With
-    ceilings set, the weekly share is naturally smaller than the daily one;
-    without them it falls back to share-of-total (which coincides on the day the
-    weekly window resets).
-
-  Each row shows the reset date. Set your plan's ceilings in the config (see
-  below) and the middle column becomes **`used / limit`** with a bar that turns
-  amber past 60% and red past 85%. The `5-hour` window lives under
-  **▾ more details**.
+  - **limits · from Claude** — the **real** rolling windows Anthropic enforces,
+    read straight from Claude Code's own `/usage` cache
+    (`~/.claude.json` → `cachedUsageUtilization`): the **5-hour** (session)
+    window and the **weekly** (7-day) window, each with its true **% used** and
+    its true **reset time** — no estimate, no config. The header shows how long
+    ago Claude Code last refreshed those figures. (Anthropic has no "daily"
+    limit; if the cache isn't present yet the row falls back to a local token
+    estimate, clearly marked, until you next run Claude Code.)
+  - **this session · est. share** — roughly how much of each real window *this
+    session* is responsible for, derived from Anthropic's live % over the same
+    span (marked `~`).
+  - **by source · this week** — one row per place Claude Code runs on this PC
+    (each `~/.claude/projects/<folder>` folds into a named source — e.g.
+    **OpenClaw**, **Claude Desktop**, plain **Claude Code**), with its tokens
+    this week and its contribution to the weekly limit. Those contributions sum
+    to the real weekly `% used`.
 
 - **▾ more details** — session cost (est.), input/output split, cache write/read,
   a **message-mix** breakdown (user prompts · tool results · system/injected ·
@@ -146,9 +144,11 @@ present; set `"enabled": false` to hide one, `"enabled": true` to force it.
 "providers": {
   "claude_code": {
     "enabled": true, "poll_seconds": 5,
-    "limits": {                   // fill in your plan's ceilings to get % + bar
+    // The 5-hour + weekly limits, their % and reset times are read live from
+    // Claude Code's own /usage cache - no ceilings to fill in. "limits" below
+    // is only a fallback used if that cache is missing.
+    "limits": {
       "five_hour": { "cost_usd": null, "tokens": null },
-      "daily":     { "cost_usd": null, "tokens": null },
       "weekly":    { "cost_usd": null, "tokens": null }
     },
     "sources": {                  // optional: rename ~/.claude/projects folders
